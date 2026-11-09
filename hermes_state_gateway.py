@@ -174,6 +174,21 @@ def _optional_table_columns(conn) -> dict[str, set[str]]:
 _HANDOFF_FAIL_SQL = "UPDATE sessions SET handoff_state = 'failed', handoff_error = ? WHERE "
 
 
+def _rekey_entry(entry: dict, *, old: str, new: str, old_ns: str, new_ns: str) -> bool:
+    """Move one serialized ``SessionEntry`` (a routing row, a session receipt) from profile *old*
+    to *new*: its ``session_key`` namespace and its ``origin.profile``. True when either changed."""
+    changed = False
+    session_key = entry.get("session_key")
+    if isinstance(session_key, str) and session_key.startswith(old_ns):
+        entry["session_key"] = new_ns + session_key[len(old_ns):]
+        changed = True
+    origin = entry.get("origin")
+    if isinstance(origin, dict) and origin.get("profile") == old:
+        origin["profile"] = new
+        changed = True
+    return changed
+
+
 def _rekey_api_binding_receipts(conn, *, old: str, new: str, old_ns: str, new_ns: str) -> int:
     """Rewrite the API-binding receipts a profile rename would strand; returns how many changed.
 
@@ -183,8 +198,7 @@ def _rekey_api_binding_receipts(conn, *, old: str, new: str, old_ns: str, new_ns
     ``profile_mismatch`` after ``hermes profile rename``, although ``rekey_profile_state`` already
     moved the session rows, the routing index and the origin columns. ``profile_id`` is left as
     stored: the resume gate accepts a receipt minted under an older home of this store when its
-    origin names this profile (#150633). Local-policy receipts carry the same fields but are rekeyed
-    with the local session lane, not here.
+    origin names this profile (#150633).
     """
     from hermes_state_local import API_BINDING_PREFIX
 
@@ -197,18 +211,7 @@ def _rekey_api_binding_receipts(conn, *, old: str, new: str, old_ns: str, new_ns
         except (TypeError, ValueError):
             continue
         entry = payload.get("entry") if isinstance(payload, dict) else None
-        if not isinstance(entry, dict):
-            continue
-        changed = False
-        session_key = entry.get("session_key")
-        if isinstance(session_key, str) and session_key.startswith(old_ns):
-            entry["session_key"] = new_ns + session_key[len(old_ns):]
-            changed = True
-        origin = entry.get("origin")
-        if isinstance(origin, dict) and origin.get("profile") == old:
-            origin["profile"] = new
-            changed = True
-        if changed:
+        if isinstance(entry, dict) and _rekey_entry(entry, old=old, new=new, old_ns=old_ns, new_ns=new_ns):
             conn.execute("UPDATE state_meta SET value=? WHERE key=?",
                          (json.dumps(payload, ensure_ascii=False), key))
             rewritten += 1
@@ -717,7 +720,7 @@ class SessionGatewayMixin:
         Covers the API-binding session receipts too: ``restore_api_session`` compares their
         ``entry.session_key`` and ``entry.origin.profile`` against the CURRENT profile name, so a
         rename that skipped them strands those chats even though their rows moved. Local-policy
-        receipts are rekeyed with the local session lane.
+        receipts (``gateway.local_policy.v1:*``) are not rekeyed here yet.
         """
         old, new = (old_name or "").strip(), (new_name or "").strip()
         counts: dict[str, int] = {}
@@ -812,11 +815,7 @@ class SessionGatewayMixin:
                     except (ValueError, TypeError):
                         payload = None
                     if isinstance(payload, dict):
-                        if isinstance(payload.get("session_key"), str) and payload["session_key"].startswith(old_ns):
-                            payload["session_key"] = new_ns + payload["session_key"][ns_len:]
-                        origin = payload.get("origin")
-                        if isinstance(origin, dict) and origin.get("profile") == old:
-                            origin["profile"] = new
+                        _rekey_entry(payload, old=old, new=new, old_ns=old_ns, new_ns=new_ns)
                         new_json = json.dumps(payload, ensure_ascii=False)
                 conn.execute(
                     "UPDATE gateway_routing SET session_key = ?, entry_json = ? WHERE rowid = ?",

@@ -228,12 +228,13 @@ class TestRekeyProfileState:
                       "origin": {"platform": "api_server", "chat_id": "sess_api",
                                  "profile": "oldname"}},
         }
+        # Its name starts with the renamed one: only the whole ``agent:<name>:`` namespace may match.
         bystander = {
-            "profile_id": "/homes/keepme", "session_id": "sess_keep",
+            "profile_id": "/homes/oldname2", "session_id": "sess_keep",
             "entry": {"session_id": "sess_keep",
-                      "session_key": "agent:keepme:api_server:dm:sess_keep",
+                      "session_key": "agent:oldname2:api_server:dm:sess_keep",
                       "origin": {"platform": "api_server", "chat_id": "sess_keep",
-                                 "profile": "keepme"}},
+                                 "profile": "oldname2"}},
         }
         for key, payload in (
             ("gateway.api.binding.v1.sess_api", bound),
@@ -260,16 +261,17 @@ class TestRekeyProfileState:
         assert counts.get("api_binding_receipts") == 1
 
     def test_leaves_unparseable_receipt_rows_alone(self, db):
-        """Control: a receipt the store cannot parse is skipped, not rewritten into garbage."""
+        """Control: a receipt the store cannot parse is skipped, not rewritten into garbage. The key
+        carries the real prefix, so the rekey scan does read it."""
         db._write_sql("INSERT INTO state_meta (key, value) VALUES (?, ?)",
-                      ("gateway.api.binding.v1:broken", "not json"))
+                      ("gateway.api.binding.v1.broken", "not json"))
 
         counts = db.rekey_profile_state("oldname", "newname")
 
         assert counts.get("api_binding_receipts", 0) == 0
         assert db._read_one(
             "SELECT value FROM state_meta WHERE key = ?",
-            ("gateway.api.binding.v1:broken",))["value"] == "not json"
+            ("gateway.api.binding.v1.broken",))["value"] == "not json"
 
     def test_rekeys_legacy_ledger_without_adapter_profile_by_session_key(self, db):
         """A ledger created before adapter_profile existed is rekeyed on its namespace alone."""
